@@ -1,0 +1,35 @@
+# Local configuration and runtime state
+.env
+.env.local
+.env.*.local
+/runtime/
+/data/
+/logs/
+/docs/
+*.log
+*.pid
+*.sqlite3
+*.dump
+*.sql.gz
+
+# Dependencies and build outputs
+node_modules/
+dist/
+build/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage*
+coverage/
+htmlcov/
+playwright-report/
+test-results/
+
+# Editor state
+.idea/
+.vscode/
+.DS_Store

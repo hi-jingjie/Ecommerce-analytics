@@ -1,0 +1,42 @@
+name: ecommerce-analytics
+
+services:
+  sqlbot:
+    image: ${SQLBOT_IMAGE:?Set SQLBOT_IMAGE in .env}
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:18000:8000"
+      - "127.0.0.1:18001:8001"
+    environment:
+      POSTGRES_SERVER: localhost
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: sqlbot
+      POSTGRES_USER: root
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      SECRET_KEY: ${SECRET_KEY:?Set SECRET_KEY in .env}
+      PROJECT_NAME: SQLBot
+      DEFAULT_PWD: ${DEFAULT_PWD:?Set DEFAULT_PWD in .env}
+      DS_AES_KEY: ${DS_AES_KEY:?Set DS_AES_KEY in .env}
+      SERVER_IMAGE_HOST: http://localhost:18001/images/
+      FRONTEND_HOST: http://localhost:18000
+      BACKEND_CORS_ORIGINS: http://localhost:18000,http://127.0.0.1:18000
+      LOG_LEVEL: INFO
+      SQL_DEBUG: "false"
+      TZ: Asia/Shanghai
+    volumes:
+      - ./data/sqlbot/excel:/opt/sqlbot/data/excel
+      - ./data/sqlbot/file:/opt/sqlbot/data/file
+      - ./data/sqlbot/images:/opt/sqlbot/images
+      - ./data/sqlbot/logs:/opt/sqlbot/app/logs
+      - ./data/postgresql:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      start_period: 120s
+      retries: 20
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"

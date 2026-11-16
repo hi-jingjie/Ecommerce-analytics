@@ -1,0 +1,3 @@
+# SQLBot v1.10.2 uses naive datetimes for audit records. Newer SQLModel
+# releases reject these values; retain a version within upstream's range.
+sqlmodel==0.0.24
