@@ -55,6 +55,32 @@ with tempfile.TemporaryDirectory(prefix='analytics-browser-') as folder:
                 page.locator('#import [name=file]').set_input_files(root/'examples/orders.csv')
                 page.locator('#import button').click()
                 expect(page.locator('#source option')).to_have_count(2)
+                expect(page.locator('#history')).to_contain_text('演示订单')
+                page.locator('#audit-refresh').click()
+                expect(page.locator('#audit tr').first).to_be_visible()
+
+                # Seed a second page through the API, then page through the actual table.
+                login = page.request.post(base + '/api/login', data={
+                    'username': 'admin', 'password': 'browser-password-123',
+                })
+                assert login.ok, login.text()
+                headers = {'Authorization': 'Bearer ' + login.json()['access_token']}
+                for _ in range(20):
+                    plan = page.request.post(base + '/api/previews', headers=headers, data={
+                        'source_id': 1, 'metric': 'paid_orders',
+                        'start_date': '2026-01-01', 'end_date': '2026-01-31',
+                    })
+                    assert plan.ok, plan.text()
+                    result = page.request.post(
+                        base + '/api/previews/' + plan.json()['id'] + '/execute', headers=headers,
+                    )
+                    assert result.ok, result.text()
+                page.locator('#refresh').click()
+                expect(page.locator('#history tr')).to_have_count(20)
+                page.locator('#history-more').click()
+                expect(page.locator('#history tr')).to_have_count(21)
+                expect(page.locator('#history-more')).to_be_hidden()
+                expect(page.locator('#history tr').last).to_contain_text('300.00')
                 (root/'artifacts').mkdir(exist_ok=True)
                 page.screenshot(path=root/'artifacts/workbench.png', full_page=True)
                 page.set_viewport_size({'width':390,'height':844})
@@ -63,7 +89,7 @@ with tempfile.TemporaryDirectory(prefix='analytics-browser-') as folder:
                 expect(page.locator('#auth')).to_be_visible()
                 assert not errors, errors
                 browser.close()
-                print('PASS browser: setup, login, demo, preview, execute, history, CSV import, mobile layout, logout')
+                print('PASS browser: setup, login, demo, preview, execute, history pagination, audit, CSV import, mobile layout, logout')
         finally:
             process.terminate()
             process.wait(timeout=10)

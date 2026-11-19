@@ -1,4 +1,5 @@
 """Check PostgreSQL using an isolated cluster, private socket, and synthetic data."""
+import argparse
 import os
 from pathlib import Path
 import subprocess
@@ -6,7 +7,11 @@ import tempfile
 import sys
 import asyncio
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+project = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(project))
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--suite', action='store_true', help='also run pytest with PostgreSQL cases enabled')
+args = parser.parse_args()
 bin_path = Path(os.environ['PG_BIN'])
 with tempfile.TemporaryDirectory(prefix='analytics-pg-') as folder:
     root = Path(folder)
@@ -37,5 +42,11 @@ with tempfile.TemporaryDirectory(prefix='analytics-pg-') as folder:
         asyncio.run(check())
         main.engine.dispose()
         print('PASS PostgreSQL: schema, setup, login, demo, user creation, preview, aggregate, history')
+        if args.suite:
+            subprocess.run(
+                [sys.executable, '-m', 'pytest', '-q'],
+                env={**os.environ, 'TEST_POSTGRES_URL': os.environ['DATABASE_URL']},
+                cwd=project, check=True,
+            )
     finally:
         subprocess.run([str(bin_path/'pg_ctl'), '-D', str(data), '-m', 'fast', '-w', 'stop'], check=True, stdout=subprocess.DEVNULL)

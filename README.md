@@ -1,14 +1,14 @@
 # 电商指标工作台
 
-独立实现的后端作品集项目：FastAPI、SQLAlchemy、关系数据库和无构建依赖的浏览器界面。流程为导入订单、分配访问范围、预览口径、确认执行、查看个人历史。
+面向电商运营的指标查询工作台，后端使用 FastAPI 和 SQLAlchemy。管理员导入订单并分配数据权限，分析人员可以预览查询范围、执行指标计算，并查看当时使用的数据快照和统计口径。
 
 ## 功能
 
 - 初始化令牌保护、PBKDF2 密码哈希、8 小时会话、退出失效、停用账号及单进程登录限速。
-- CSV 导入：最多 10000 行、订单编号去重、金额与日期校验、事务整体提交。
+- CSV 每次最多导入 10000 行，按数据源保存唯一业务订单号。金额以整数分存储，导入校验和数据库约束共同检查金额范围。
 - 数据源授权、服务器地区过滤、管理员用户管理；查询历史按用户隔离。
 - 数据库内聚合；筛选值使用绑定参数。五分钟一次性预览，执行前复核权限和数据源版本。
-- 浏览器工作台、健康检查、Docker Compose 持久化运行配置。
+- 查询历史支持游标翻页，并记录数据版本、口径版本、命中行数与耗时。管理员可查看操作审计。
 
 ## 本地运行
 
@@ -33,7 +33,7 @@ uvicorn app.main:app --host 127.0.0.1 --port 18080 --no-proxy-headers
 4. 创建地区为“华东”的普通用户，授权演示数据源：该用户 1 月支付金额为 100.00。
 5. 普通用户生成预览后，管理员改变地区或撤销授权，旧预览无法执行。
 
-可使用 `examples/orders.csv` 导入另一个数据源。每次导入创建不可修改的快照，名称必须唯一，一行一笔订单，订单编号在文件内唯一。
+可使用 `examples/orders.csv` 导入另一个数据源。每次导入创建不可修改的快照，名称必须唯一，一行一笔订单，业务订单编号在同一快照内唯一，保留前导零。
 
 ## 指标口径 v1
 
@@ -49,22 +49,41 @@ uvicorn app.main:app --host 127.0.0.1 --port 18080 --no-proxy-headers
 ## 测试
 
 ```bash
-pytest -q
+python -m pytest -q
 node --check app/static/app.js
 ```
 
-测试使用临时库，覆盖授权、地区过滤、退款日期、注入输入、重复及过期预览、权限撤销、退出和导入原子性。浏览器验收脚本 `scripts/browser_smoke.py` 需另装 Playwright 与 Chromium，会自动创建临时数据库和服务。
+默认使用临时 SQLite 库。有 PostgreSQL 工具时，下面的命令会创建临时集群，跑 HTTP 冒烟和完整测试套件，结束后清理集群。也可以设置 `TEST_POSTGRES_URL` 指向允许创建测试 schema 的专用库，再运行 `python -m pytest -q`。
 
-`requirements.lock` 记录本次独立虚拟环境全部验收依赖版本，可使用 `pip install -r requirements.lock` 重现。PostgreSQL 验收：设置 PG_BIN 为 PostgreSQL 可执行文件目录后运行 `python scripts/postgres_smoke.py`；脚本创建并自动清理独立临时集群。设计说明见 DESIGN.md，实际验收范围见 VERIFICATION.md。
+```bash
+PG_BIN="$(pg_config --bindir)" python scripts/postgres_smoke.py --suite
+```
+
+`python scripts/benchmark.py` 可复测单个 10000 行 SQLite 快照的 CSV 校验与入库耗时，以及带地区和渠道筛选的数据库聚合耗时。脚本使用临时库，输出数据规模、结果和 预热后 50 次采样的 P50、P95。
+
+浏览器验收脚本 `python scripts/browser_smoke.py` 需另装 Playwright 与 Chromium。脚本启动临时服务，验证导入、查询、历史翻页、审计和移动端布局。
+
+`requirements.lock` 记录本次独立虚拟环境全部验收依赖版本，可使用 `pip install -r requirements.lock` 重现。CI 涵盖 SQLite、PostgreSQL、前端语法和容器启动检查。设计与验收范围见 [DESIGN.md](DESIGN.md) 和 [VERIFICATION.md](VERIFICATION.md)。
 
 ## 容器运行
 
 复制 `.env.example` 为 `.env`，填写随机 SETUP_TOKEN，再执行 `docker compose up --build -d`。访问 http://127.0.0.1:18080 。命名卷持久化数据库；`docker compose down -v` 会删除数据。配置只监听回环地址。公网部署需 TLS 反向代理、共享限流、备份与监控；当前实现不是经过生产加固的服务。
 
-首次启动创建 v1 数据库表。检测到不兼容的早期原型结构时会拒绝启动，应使用新的 v1 数据库；不自动迁移早期原型数据。可通过 DATABASE_URL 指定 SQLAlchemy 地址，PostgreSQL 使用 postgresql+psycopg:// 协议。
+首次启动创建 v2 表结构，已有的工作台 v1 库会在启动时升级。更新已有部署前先备份并在副本验证。旧库从未保存原始业务订单号，升级会为旧订单生成带标记的内部编号。显式迁移步骤见 [MIGRATION.md](MIGRATION.md)。通过 `DATABASE_URL` 可指定 PostgreSQL 数据库，连接协议为 `postgresql+psycopg://`。
 
-## 范围与代码
+## 接口与维护
 
-数据接入使用 CSV 快照，不提供外部业务库实时连接、自动同步、模型问答或任意 SQL 编辑。`app/main.py` 实现数据模型与后端接口，`app/static/` 是 HTML/CSS/JavaScript 工作台，`tests/` 为接口和数据库回归测试，`examples/` 为合成数据。
+- `GET /api/history?limit=20` 返回当前用户的查询记录和 `next_cursor`。传入 `before_id` 继续读取更早一页。无分页参数时仍返回最近 100 条以内的数组，兼容旧客户端。
+- `GET /api/audit?limit=20` 需要管理员权限，支持同样的翻页方式。事件包含操作人、操作类型、结果、HTTP 状态和耗时。
+- 在与服务相同的数据库配置下执行 `python -m app.cleanup`，清理已过期的预览和会话。成功查询的历史和审计继续保留。
 
-此实现不依赖 SQLBot 及其扩展包。第三方框架、数据库、库的许可仍属于对应作者。本项目是范围明确的指标工作流，不宣称覆盖大型 BI 平台全部功能。
+## 代码入口
+
+| 文件 | 职责 |
+| --- | --- |
+| `app/main.py` | 认证、权限检查和 API 事务 |
+| `app/schemas.py`、`app/orders.py` | 请求参数与 CSV 校验 |
+| `app/metrics.py` | 指标筛选、聚合和金额计算 |
+| `app/models.py`、`app/migrate.py` | 表结构、约束与升级 |
+| `app/audit.py`、`app/cleanup.py` | 操作审计、历史分页与过期数据维护 |
+| `app/static/`、`examples/` | 浏览器工作台与演示订单 |

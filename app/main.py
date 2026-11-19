@@ -2,112 +2,35 @@ import hashlib
 import hmac
 import os
 import secrets
-import csv
-import io
-import json
-from pathlib import Path
-from contextlib import asynccontextmanager
-from datetime import date, datetime, timedelta, timezone
-from decimal import Decimal
-from typing import Literal
-
-from fastapi import Depends, FastAPI, Header, HTTPException
-from fastapi.responses import HTMLResponse, FileResponse
-from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
-from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, Numeric, String, Text, create_engine, func, select, delete, update
-from sqlalchemy.exc import IntegrityError
-from sqlalchemy import inspect
-import time
 import threading
+import time
 from collections import defaultdict, deque
-from fastapi import Request
-from fastapi.responses import JSONResponse
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
+from contextlib import asynccontextmanager
+from datetime import date, datetime, timedelta
+from pathlib import Path
+from typing import Annotated
+
+from fastapi import Depends, FastAPI, Header, HTTPException, Query as QueryParam, Request
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+from sqlalchemy import create_engine, delete, func, select, update
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import sessionmaker
+
+from . import audit
+from .metrics import aggregate
+from .models import AuditEvent, Base, Bootstrap, Grant, History, Order, Preview, Source, Token, User
+from .orders import parse_orders
+from .schemas import Access, Credentials, ImportCSV, NewUser, Query
+
 
 DATABASE_URL = os.environ.get('DATABASE_URL', 'sqlite:///./analytics-v1.db')
 engine = create_engine(DATABASE_URL, connect_args={'check_same_thread': False} if DATABASE_URL.startswith('sqlite') else {})
 SessionLocal = sessionmaker(bind=engine)
 
-class Base(DeclarativeBase):
-    pass
-
-class Bootstrap(Base):
-    __tablename__ = 'bootstrap'
-    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=False)
-
-class User(Base):
-    __tablename__ = 'users'
-    id: Mapped[int] = mapped_column(primary_key=True)
-    username: Mapped[str] = mapped_column(String(80), unique=True)
-    password_hash: Mapped[str] = mapped_column(String(200))
-    region: Mapped[str | None] = mapped_column(String(80), nullable=True)
-    admin: Mapped[bool] = mapped_column(Boolean, default=False)
-    active: Mapped[bool] = mapped_column(Boolean, default=True)
-
-class Source(Base):
-    __tablename__ = 'sources'
-    id: Mapped[int] = mapped_column(primary_key=True)
-    name: Mapped[str] = mapped_column(String(80), unique=True)
-    version: Mapped[int] = mapped_column(default=1)
-
-class Grant(Base):
-    __tablename__ = 'grants'
-    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), primary_key=True)
-    source_id: Mapped[int] = mapped_column(ForeignKey('sources.id'), primary_key=True)
-
-class Preview(Base):
-    __tablename__ = 'previews'
-    id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'))
-    payload: Mapped[str] = mapped_column(Text)
-    region: Mapped[str | None] = mapped_column(String(80), nullable=True)
-    source_version: Mapped[int] = mapped_column(Integer)
-    expires: Mapped[datetime] = mapped_column(DateTime)
-    used: Mapped[bool] = mapped_column(Boolean, default=False)
-
-class Token(Base):
-    __tablename__ = 'sessions'
-    id: Mapped[int] = mapped_column(primary_key=True)
-    digest: Mapped[str] = mapped_column(String(64), unique=True)
-    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'))
-    expires: Mapped[datetime] = mapped_column(DateTime)
-
-class Order(Base):
-    __tablename__ = 'orders'
-    id: Mapped[int] = mapped_column(primary_key=True)
-    source_id: Mapped[int | None] = mapped_column(ForeignKey('sources.id'), nullable=True, index=True)
-    day: Mapped[date] = mapped_column(Date)
-    region: Mapped[str] = mapped_column(String(80))
-    channel: Mapped[str] = mapped_column(String(80))
-    status: Mapped[str] = mapped_column(String(30))
-    amount: Mapped[Decimal] = mapped_column(Numeric(14, 2))
-    refund: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=0)
-    refund_day: Mapped[date | None] = mapped_column(Date, nullable=True)
-
-class History(Base):
-    __tablename__ = 'query_history'
-    id: Mapped[int] = mapped_column(primary_key=True)
-    source_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    channel: Mapped[str | None] = mapped_column(String(80), nullable=True)
-    region: Mapped[str | None] = mapped_column(String(80), nullable=True)
-    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'))
-    metric: Mapped[str] = mapped_column(String(40))
-    start_date: Mapped[date] = mapped_column(Date)
-    end_date: Mapped[date] = mapped_column(Date)
-    value: Mapped[Decimal] = mapped_column(Numeric(16, 2))
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-
 def init_db():
-    # Refuse to silently run against an incompatible prototype schema.
-    inspector = inspect(engine)
-    for table in Base.metadata.sorted_tables:
-        if inspector.has_table(table.name):
-            actual = {column['name'] for column in inspector.get_columns(table.name)}
-            missing = set(table.columns.keys()) - actual
-            if missing:
-                raise RuntimeError(f'Incompatible database schema for {table.name}: {sorted(missing)}. Use a fresh v1 database or migrate a backup first.')
-    Base.metadata.create_all(engine)
+    from app.migrate import upgrade
+    upgrade(engine)
 
 @asynccontextmanager
 async def lifespan(app):
@@ -143,32 +66,35 @@ async def request_limits(request: Request, call_next):
         response.headers['Cache-Control'] = 'no-store'
     return response
 
-class Credentials(BaseModel):
-    username: str = Field(min_length=3, max_length=80)
-    password: str = Field(min_length=12, max_length=128)
-
-class Query(BaseModel):
-    source_id: int = Field(default=1, ge=1)
-    metric: Literal['payment_amount', 'paid_orders', 'average_order_value', 'refund_amount']
-    start_date: date
-    end_date: date
-    channel: str | None = Field(default=None, max_length=80)
 
 def hash_password(password, salt=None):
     salt = salt or secrets.token_hex(16)
     hashed = hashlib.pbkdf2_hmac('sha256', password.encode(), salt.encode(), 600_000).hex()
     return salt + '$' + hashed
 
+def session_actor(db, authorization):
+    if not authorization or not authorization.startswith('Bearer '):
+        return None
+    digest = hashlib.sha256(authorization[7:].encode()).hexdigest()
+    return db.scalar(select(User).join(Token, Token.user_id == User.id).where(
+        Token.digest == digest, Token.expires > datetime.utcnow()
+    ))
+
+
 def require_user(authorization: str | None = Header(default=None)):
     if not authorization or not authorization.startswith('Bearer '):
         raise HTTPException(401, '请登录')
-    digest = hashlib.sha256(authorization[7:].encode()).hexdigest()
     with SessionLocal() as db:
-        session = db.scalar(select(Token).where(Token.digest == digest, Token.expires > datetime.utcnow()))
-        user = db.get(User, session.user_id) if session else None
+        user = session_actor(db, authorization)
+        if user is not None:
+            audit.identify_actor(user.id)
         if not user or not user.active:
             raise HTTPException(401, '登录已失效')
         return {'id': user.id, 'region': user.region, 'admin': user.admin}
+
+
+app.router.route_class = audit.audited_routes(lambda: SessionLocal(), session_actor)
+
 
 @app.post('/api/setup', status_code=201)
 def setup(data: Credentials, x_setup_token: str | None = Header(default=None)):
@@ -179,8 +105,11 @@ def setup(data: Credentials, x_setup_token: str | None = Header(default=None)):
         if db.scalar(select(func.count()).select_from(User)):
             raise HTTPException(403, '初始化已完成')
         db.add(Bootstrap(id=1))
-        db.add(User(username=data.username, password_hash=hash_password(data.password), admin=True))
+        admin = User(username=data.username, password_hash=hash_password(data.password), admin=True)
+        db.add(admin)
         try:
+            db.flush()
+            audit.success(db, 'system.setup', admin.id, 201)
             db.commit()
         except IntegrityError:
             db.rollback()
@@ -208,39 +137,36 @@ def demo(user=Depends(require_user)):
         source = Source(name='演示订单')
         db.add(source)
         db.flush()
-        db.add_all([Order(source_id=source.id, day=date(2026, 1, 10), region='华东', channel='网页', status='paid', amount=Decimal('100'), refund=Decimal('0')), Order(source_id=source.id, day=date(2026, 1, 11), region='华北', channel='移动端', status='paid', amount=Decimal('200'), refund=Decimal('20'), refund_day=date(2026, 2, 1))])
+        db.add_all([Order(source_id=source.id, order_id='demo-1', day=date(2026, 1, 10), region='华东', channel='网页', status='paid', amount_cents=10000, refund_cents=0), Order(source_id=source.id, order_id='demo-2', day=date(2026, 1, 11), region='华北', channel='移动端', status='paid', amount_cents=20000, refund_cents=2000, refund_day=date(2026, 2, 1))])
+        audit.success(db, 'source.demo', user['id'], source_id=source.id, rows=2)
         db.commit()
     return {'message': '示例数据已创建'}
 
-def query(data: Query, user=Depends(require_user)):
-    if data.start_date > data.end_date:
-        raise HTTPException(422, '开始日期不能晚于结束日期')
-    with SessionLocal() as db:
-        value, count = aggregate(db, data, user)
-        db.add(History(user_id=user['id'], source_id=data.source_id, metric=data.metric, start_date=data.start_date, end_date=data.end_date, value=value))
-        db.commit()
-        return {'value': float(value), 'count': count}
+PageLimit = Annotated[int, QueryParam(ge=1, le=100)]
+OptionalPageLimit = Annotated[int | None, QueryParam(ge=1, le=100)]
+PageCursor = Annotated[int | None, QueryParam(ge=1, le=2**63 - 1)]
+
 
 @app.get('/api/history')
-def history(user=Depends(require_user)):
+def history(user=Depends(require_user), limit: OptionalPageLimit = None, before_id: PageCursor = None):
     with SessionLocal() as db:
-        rows = db.scalars(select(History).where(History.user_id == user['id']).order_by(History.id.desc()).limit(100)).all()
-        return [{'id': r.id, 'metric': r.metric, 'value': str(r.value), 'start_date': r.start_date, 'end_date': r.end_date} for r in rows]
+        own_history = select(History).where(History.user_id == user['id'])
+        result = audit.page(db, own_history, History.id, audit.history_item, limit or 100, before_id)
+        if limit is None and before_id is None:
+            return result['items']
+        return result
+
+
+@app.get('/api/audit')
+def audit_log(user=Depends(require_user), limit: PageLimit = 20, before_id: PageCursor = None):
+    admin_only(user)
+    with SessionLocal() as db:
+        return audit.page(db, select(AuditEvent), AuditEvent.id, audit.audit_item, limit, before_id)
+
 
 @app.get('/', response_class=HTMLResponse)
 def home():
     return FileResponse(Path(__file__).parent / 'static' / 'index.html')
-
-def aggregate(db, data, user):
-    day = Order.refund_day if data.metric == 'refund_amount' else Order.day
-    stmt = select(func.count(Order.id), func.coalesce(func.sum(Order.amount), 0), func.coalesce(func.sum(Order.refund), 0)).where(day >= data.start_date, day <= data.end_date, Order.status == 'paid', Order.source_id == data.source_id)
-    if user['region'] is not None:
-        stmt = stmt.where(Order.region == user['region'])
-    if data.channel:
-        stmt = stmt.where(Order.channel == data.channel)
-    count, total, refunds = db.execute(stmt).one()
-    value = {'payment_amount': total, 'paid_orders': count, 'average_order_value': total / count if count else 0, 'refund_amount': refunds}[data.metric]
-    return Decimal(value).quantize(Decimal('.01')), count
 
 def admin_only(user):
     if not user['admin']:
@@ -252,13 +178,6 @@ def source_access(db, source_id, user):
         raise HTTPException(403, '无数据源访问权限')
     return source
 
-class Access(BaseModel):
-    region: str | None = Field(default=None, min_length=1, max_length=80)
-    source_ids: list[int] = Field(default_factory=list, max_length=100)
-    active: bool = True
-
-class NewUser(Credentials, Access):
-    pass
 
 @app.get('/api/me')
 def me(user=Depends(require_user)):
@@ -289,6 +208,13 @@ def set_grants(db, uid, ids):
     db.execute(delete(Grant).where(Grant.user_id == uid))
     db.add_all([Grant(user_id=uid, source_id=sid) for sid in set(ids)])
 
+def lock_access_user(db, uid):
+    # Both operations take this lock before reading grants, even for a grant-only change.
+    # SQLite has no row locks, so reserve its writer before taking a read snapshot.
+    if db.get_bind().dialect.name == 'sqlite':
+        db.connection().exec_driver_sql('BEGIN IMMEDIATE')
+    return db.scalar(select(User).where(User.id == uid).with_for_update())
+
 @app.post('/api/users', status_code=201)
 def create_user(data: NewUser, user=Depends(require_user)):
     admin_only(user)
@@ -298,6 +224,8 @@ def create_user(data: NewUser, user=Depends(require_user)):
         try:
             db.flush()
             set_grants(db, u.id, data.source_ids)
+            audit.success(db, 'user.create', user['id'], 201, target_user_id=u.id,
+                          source_ids=sorted(set(data.source_ids)), region=data.region, active=data.active)
             db.commit()
         except IntegrityError:
             db.rollback()
@@ -307,14 +235,17 @@ def create_user(data: NewUser, user=Depends(require_user)):
 @app.put('/api/users/{uid}/access')
 def update_access(uid: int, data: Access, user=Depends(require_user)):
     admin_only(user)
+    audit.add_context(target_user_id=uid)
     with SessionLocal() as db:
-        u = db.get(User, uid)
+        u = lock_access_user(db, uid)
         if not u:
             raise HTTPException(404, '用户不存在')
         if u.admin:
             raise HTTPException(409, '不能通过此接口修改管理员')
         u.region, u.active = data.region, data.active
         set_grants(db, uid, data.source_ids)
+        audit.success(db, 'user.access', user['id'], target_user_id=uid,
+                      source_ids=sorted(set(data.source_ids)), region=data.region, active=data.active)
         db.commit()
     return {'message': '权限已更新'}
 
@@ -326,39 +257,11 @@ def sources(user=Depends(require_user)):
             stmt = stmt.join(Grant).where(Grant.user_id == user['id'])
         return [{'id': s.id, 'name': s.name, 'version': s.version} for s in db.scalars(stmt)]
 
-class ImportCSV(BaseModel):
-    name: str = Field(min_length=1, max_length=80)
-    csv_text: str = Field(min_length=1, max_length=2_000_000)
 
 @app.post('/api/sources/import', status_code=201)
 def import_csv(data: ImportCSV, user=Depends(require_user)):
     admin_only(user)
-    reader = csv.DictReader(io.StringIO(data.csv_text))
-    required = {'order_id', 'day', 'region', 'channel', 'amount', 'status', 'refund', 'refund_day'}
-    if set(reader.fieldnames or []) != required:
-        raise HTTPException(422, 'CSV 列必须为 '+','.join(sorted(required)))
-    rows, ids = [], set()
-    try:
-        for row in reader:
-            if None in row or any(value is None for value in row.values()):
-                raise ValueError('字段数量与表头不一致')
-            if len(rows) >= 10000 or not row['order_id'] or row['order_id'] in ids:
-                raise ValueError('订单编号重复、为空或超过 10000 行')
-            ids.add(row['order_id'])
-            amount, refund = Decimal(row['amount']), Decimal(row['refund'] or '0')
-            if not amount.is_finite() or not refund.is_finite() or not (0 <= refund <= amount < 10**12) or amount != amount.quantize(Decimal('.01')) or refund != refund.quantize(Decimal('.01')):
-                raise ValueError('金额必须非负且最多两位小数，退款不超过支付金额')
-            if row['status'] not in ('paid', 'cancelled') or not all(0 < len(row[k]) <= 80 for k in ('region', 'channel')):
-                raise ValueError('状态、地区或渠道无效')
-            day = date.fromisoformat(row['day'])
-            refund_day = date.fromisoformat(row['refund_day']) if row['refund_day'] else None
-            if refund and (not refund_day or refund_day < day or row['status'] != 'paid'):
-                raise ValueError('退款必须提供不早于支付日期的退款日期且订单已支付')
-            rows.append(Order(day=day, region=row['region'], channel=row['channel'], amount=amount, status=row['status'], refund=refund, refund_day=refund_day))
-    except (ValueError, ArithmeticError, TypeError) as exc:
-        raise HTTPException(422, f'CSV 第 {len(rows)+2} 行格式错误：{exc}')
-    if not rows:
-        raise HTTPException(422, 'CSV 没有数据')
+    rows = parse_orders(data.csv_text)
     with SessionLocal() as db:
         source = Source(name=data.name)
         db.add(source)
@@ -367,6 +270,8 @@ def import_csv(data: ImportCSV, user=Depends(require_user)):
             for row in rows:
                 row.source_id = source.id
             db.add_all(rows)
+            audit.success(db, 'source.import', user['id'], 201, source_id=source.id,
+                          source_version=source.version, rows=len(rows))
             db.commit()
         except IntegrityError:
             db.rollback()
@@ -375,25 +280,33 @@ def import_csv(data: ImportCSV, user=Depends(require_user)):
 
 @app.post('/api/previews')
 def preview(data: Query, user=Depends(require_user)):
+    audit.add_context(source_id=data.source_id, metric=data.metric)
     if data.start_date > data.end_date or (data.end_date-data.start_date).days > 3660:
         raise HTTPException(422, '日期范围无效或超过十年')
     with SessionLocal() as db:
         source = source_access(db, data.source_id, user)
         p = Preview(id=secrets.token_urlsafe(24), user_id=user['id'], payload=data.model_dump_json(), region=user['region'], source_version=source.version, expires=datetime.utcnow()+timedelta(minutes=5))
         db.add(p)
+        audit.success(db, 'query.preview', user['id'], preview_id=p.id, source_id=source.id,
+                      source_version=source.version, metric=data.metric)
         db.commit()
-        return {'id': p.id, 'query': data.model_dump(), 'region': p.region, 'source': source.name, 'definition_version': 1, 'expires': p.expires, 'date_basis': '退款发生日' if data.metric == 'refund_amount' else '支付日'}
+        return {'id': p.id, 'query': data.model_dump(), 'region': p.region, 'source': source.name, 'definition_version': 1, 'expires': p.expires, 'date_basis': audit.date_basis(data.metric)}
 
 @app.post('/api/previews/{pid}/execute')
 def execute_preview(pid: str, user=Depends(require_user)):
+    started = time.monotonic()
     with SessionLocal() as db:
+        current = lock_access_user(db, user['id'])
+        if current is None:
+            raise HTTPException(401, '登录已失效')
         p = db.get(Preview, pid)
         if not p or p.user_id != user['id']:
             raise HTTPException(404, '预览不存在')
+        audit.add_context(preview_id=p.id, source_version=p.source_version)
         if p.used or p.expires <= datetime.utcnow():
             raise HTTPException(409, '预览已执行或过期，请重新预览')
         data = Query.model_validate_json(p.payload)
-        current = db.get(User, user['id'])
+        audit.add_context(source_id=data.source_id, metric=data.metric)
         fresh = {'id': current.id, 'region': current.region, 'admin': current.admin}
         source = source_access(db, data.source_id, fresh)
         if not current.active or p.region != current.region or p.source_version != source.version:
@@ -402,7 +315,18 @@ def execute_preview(pid: str, user=Depends(require_user)):
         if claimed.rowcount != 1:
             raise HTTPException(409, '预览已执行')
         value, count = aggregate(db, data, fresh)
-        db.add(History(user_id=user['id'], source_id=data.source_id, channel=data.channel, region=fresh['region'], metric=data.metric, start_date=data.start_date, end_date=data.end_date, value=value))
+        duration = audit.elapsed_ms(started)
+        history_row = History(
+            user_id=user['id'], preview_id=pid, source_id=source.id, source_name=source.name,
+            source_version=source.version, definition_version=1, channel=data.channel,
+            region=fresh['region'], metric=data.metric, start_date=data.start_date, end_date=data.end_date,
+            value=value, matched_count=count, duration_ms=duration,
+        )
+        db.add(history_row)
+        db.flush()
+        audit.success(db, 'query.execute', user['id'], history_id=history_row.id, preview_id=pid,
+                      source_id=source.id, source_version=source.version, metric=data.metric,
+                      definition_version=1, matched_count=count)
         db.commit()
         return {'value': str(value), 'count': count, 'metric': data.metric, 'definition_version': 1}
 
