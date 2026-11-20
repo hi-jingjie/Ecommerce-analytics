@@ -289,14 +289,24 @@ def import_csv(data: ImportCSV, user=Depends(require_user)):
 def reconcile_refunds(source_id: int, data: ChannelBill, user=Depends(require_user)):
     admin_only(user)
     audit.add_context(source_id=source_id)
-    channel = reconciliation.parse_bill(data.csv_text)
+    channel = reconciliation.parse_bill(data.csv_text, data.start_date, data.end_date)
     with SessionLocal.begin() as db:
         if db.get(Source, source_id) is None:
             raise HTTPException(404, '数据源不存在')
-        record, reused = reconciliation.save(db, source_id, user['id'], channel)
+        record, reused = reconciliation.save(db, source_id, user['id'], channel, data.start_date, data.end_date)
         audit.success(db, 'refund.reconcile', user['id'], source_id=source_id,
                       reconciliation_id=record.id, reused=reused)
         return reconciliation.present(record)
+
+
+@app.get('/api/sources/{source_id}/reconciliations')
+def reconciliation_history(source_id: int, user=Depends(require_user), limit: PageLimit = 20,
+                           before_id: PageCursor = None):
+    admin_only(user)
+    with SessionLocal() as db:
+        if db.get(Source, source_id) is None:
+            raise HTTPException(404, '数据源不存在')
+        return reconciliation.history_page(db, source_id, limit, before_id)
 
 
 @app.get('/api/reconciliations/{report_id}')

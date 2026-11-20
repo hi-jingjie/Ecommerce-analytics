@@ -1,6 +1,6 @@
-# 数据库结构升级到 v4
+# 数据库结构升级到 v5
 
-从项目根目录运行。应用启动和 `python -m app.migrate` 使用同一个迁移入口，目标库由 `DATABASE_URL` 决定。空库直接创建 v4。已有 v1、v2 和 v3 库在事务内升级到 v4，重复执行只校验现有结构。默认文件名仍为 `analytics-v1.db`。指标口径版本仍为 1。
+从项目根目录运行。应用启动和 `python -m app.migrate` 使用同一个迁移入口，目标库由 `DATABASE_URL` 决定。空库直接创建 v5。已有 v1 至 v4 库在事务内升级到 v5，重复执行只校验现有结构。默认文件名仍为 `analytics-v1.db`。指标口径版本仍为 1。
 
 ## 在副本上演练
 
@@ -17,7 +17,7 @@ sqlite3 -readonly analytics-rehearsal.db 'PRAGMA integrity_check'
 sqlite3 -readonly analytics-rehearsal.db 'PRAGMA foreign_key_check'
 ```
 
-预期版本为 4，完整性检查返回 `ok`，外键检查返回零行。正式升级时，在同一目录使用实际文件地址运行 `DATABASE_URL=sqlite:///./analytics-v1.db python -m app.migrate`。Compose 部署的数据文件在卷内的 `/data/analytics-v1.db`，应先停止服务并备份实际卷内数据库，再用新版镜像执行 `docker compose run --rm --no-deps analytics python -m app.migrate`。
+预期版本为 5，完整性检查返回 `ok`，外键检查返回零行。正式升级时，在同一目录使用实际文件地址运行 `DATABASE_URL=sqlite:///./analytics-v1.db python -m app.migrate`。Compose 部署的数据文件在卷内的 `/data/analytics-v1.db`，应先停止服务并备份实际卷内数据库，再用新版镜像执行 `docker compose run --rm --no-deps analytics python -m app.migrate`。
 
 **PostgreSQL**。以下命令使用本机连接参数和数据库名 `analytics`，也可通过标准 libpq 环境变量指定主机、端口和用户。迁移账号需要对应用表和序列执行 DDL 的权限。应用连接地址使用 SQLAlchemy 的 `postgresql+psycopg` 协议。
 
@@ -30,6 +30,10 @@ psql -d analytics_rehearsal -c 'SELECT version FROM schema_version WHERE id=1'
 ```
 
 演练通过后，使用实际连接地址执行 `DATABASE_URL=postgresql+psycopg:///analytics python -m app.migrate`。升级持有事务级建议锁，并对被修改表加锁。SQLite 使用 `BEGIN IMMEDIATE` 在检查和重建前取得写锁。版本记录和数据转换在同一事务中提交。
+
+## v4 升级到 v5
+
+已有报告增加两个可空账期列，并建立按快照和创建时间翻页的索引。旧记录的账期为空，继续表示整份快照；报告编号、创建时间、摘要和原始内容保持原值。PostgreSQL 同时在订单表创建用于退款汇总的组合索引；在大库升级前请在副本上测量建索引时间并预留空间。升级后可从历史列表打开旧报告，或在整份快照模式再次上传同一账单验证编号一致。
 
 ## v3 升级到 v4
 

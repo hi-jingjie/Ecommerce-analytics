@@ -71,7 +71,7 @@ def test_v2_refund_backfill_is_idempotent(isolated_engine, admin):
     main.init_db()
     main.init_db()
     with isolated_engine.connect() as conn:
-        assert conn.exec_driver_sql('SELECT version FROM schema_version').scalar_one() == 4
+        assert conn.exec_driver_sql('SELECT version FROM schema_version').scalar_one() == 5
         assert conn.exec_driver_sql('SELECT refund_id, amount_cents FROM refund_events').all() == [(None, 500)]
     q = main.Query(metric='refund_amount', source_id=sid, start_date='2026-02-01', end_date='2026-02-01')
     result = main.execute_preview(main.preview(q, admin)['id'], admin)

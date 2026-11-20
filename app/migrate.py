@@ -5,10 +5,10 @@ from decimal import Decimal
 from sqlalchemy import CheckConstraint, UniqueConstraint, inspect, select, text
 from sqlalchemy.schema import AddConstraint, CreateColumn
 
-from app.models import Base, History, Order, Reconciliation, RefundEvent, SchemaVersion, Source
+from app.models import Base, History, Order, Reconciliation, RefundEvent, SchemaVersion, Source, refund_scope_index
 
 
-VERSION = 4
+VERSION = 5
 # Frozen v1 contract. Verify before rebuilding tables so unknown columns are never lost.
 V1_COLUMNS = {
     'bootstrap': 'id',
@@ -189,7 +189,7 @@ def upgrade(engine):
         tables = set(inspector.get_table_names())
         if 'schema_version' in tables:
             versions = conn.execute(select(SchemaVersion.id, SchemaVersion.version)).all()
-            if versions not in ([(1, 2)], [(1, 3)], [(1, VERSION)]):
+            if versions not in ([(1, 2)], [(1, 3)], [(1, 4)], [(1, VERSION)]):
                 raise RuntimeError(f'不支持的数据库版本 {versions!r}')
             version = versions[0][1]
             added_in = {RefundEvent.__table__: 3, Reconciliation.__table__: 4}
@@ -198,13 +198,24 @@ def upgrade(engine):
                     if table.name in tables:
                         raise RuntimeError(f'旧库已有 {table.name} 表，请核查结构')
                     continue
-                if table.name not in tables or not set(table.c.keys()) <= {c['name'] for c in inspector.get_columns(table.name)}:
+                required = set(table.c.keys())
+                if version == 4 and table is Reconciliation.__table__:
+                    required -= {'start_date', 'end_date'}
+                if table.name not in tables or not required <= {c['name'] for c in inspector.get_columns(table.name)}:
                     raise RuntimeError(f'数据库版本标记与数据表 {table.name} 不一致')
             if version < 3:
                 RefundEvent.__table__.create(conn)
                 _copy_legacy_refunds(conn)
             if version < 4:
                 Reconciliation.__table__.create(conn)
+            if version == 4:
+                conn.exec_driver_sql('ALTER TABLE refund_reconciliations ADD COLUMN start_date DATE')
+                conn.exec_driver_sql('ALTER TABLE refund_reconciliations ADD COLUMN end_date DATE')
+                for index in Reconciliation.__table__.indexes:
+                    index.create(conn)
+            if version < VERSION:
+                if conn.dialect.name == 'postgresql':
+                    refund_scope_index.create(conn, checkfirst=True)
                 conn.execute(SchemaVersion.__table__.update().where(SchemaVersion.id == 1).values(version=VERSION))
             return VERSION
 
@@ -216,6 +227,8 @@ def upgrade(engine):
         Base.metadata.create_all(conn)
         if legacy:
             _copy_legacy_refunds(conn)
+            if conn.dialect.name == 'postgresql':
+                refund_scope_index.create(conn, checkfirst=True)
         conn.execute(SchemaVersion.__table__.insert().values(id=1, version=VERSION))
         return VERSION
 

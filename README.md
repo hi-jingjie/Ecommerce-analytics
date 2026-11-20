@@ -43,11 +43,15 @@ uvicorn app.main:app --host 127.0.0.1 --port 18080 --no-proxy-headers
 
 ### 退款对账
 
-管理员在“退款对账”选择刚导入的快照，上传 [渠道账单样例](examples/channel-bill.csv)。账单覆盖快照中的全部退款，表头为 `order_id,refund_id,refund`，每个订单内退款编号唯一。订单号和退款编号按原文匹配，保留前导零。支持只含表头的零流水账单。
+管理员在“退款对账”选择刚导入的快照，上传 [渠道账单样例](examples/channel-bill.csv)。默认对账范围为整个快照，账单表头为 `order_id,refund_id,refund`，每个订单内退款编号唯一。订单号和退款编号按原文匹配，保留前导零。支持只含表头的零流水账单。
 
 样例的系统退款共 50.00 元，渠道共 48.00 元。报告中 `demo-001 / R-02` 显示系统 19.99 元、渠道 17.99 元，差额 +2.00 元。旧退款缺少编号时，系统流水和同订单未匹配的渠道流水分行列为“待核对”，行差额留空。总差额仍包含全部流水；净差额为零时也要查看逐笔差异。
 
-同一快照重复上传相同内容会返回已保存的报告编号。调整行序或把 10.0 改写为 10.00 都会复用报告。变更金额、订单号或退款编号会生成新报告。文件上限为 2 MB、20000 条。管理员 API 支持 `POST /api/sources/{source_id}/reconciliations`（JSON 字段 `csv_text`）和 `GET /api/reconciliations/{report_id}`。
+在快照的报告历史中可以翻页，点开任一编号复查。列表按创建时间从新到旧排列。同一快照、同一账期重复上传相同账单会复用报告。调整行序或把 10.0 改写为 10.00 都会复用报告。文件上限为 2 MB、20000 条。
+
+日账或月账可填写开始和结束日期，首尾日均计入。系统侧按退款发生日筛选。渠道三列账单由上传者确认覆盖所选账期；若附上第四列 `refund_day`，系统会逐行校验并拒绝账期外的流水。例如选择 2026-02-01 至 2026-02-01，从样例账单去掉 1 月的 R-01 后上传，系统总额为 39.99 元、渠道为 37.99 元。历史中的“整份快照”表示生成报告时没有日期限制。
+
+管理员可通过 `GET /api/sources/{source_id}/reconciliations?limit=20` 列出历史，并以返回的 `next_cursor` 作为下一页的 `before_id`。`POST` 同一路径接受 `csv_text` 以及可选的 `start_date`、`end_date`。`GET /api/reconciliations/{report_id}` 返回原始报告。
 
 ## 指标口径 v1
 
@@ -75,6 +79,8 @@ PG_BIN="$(pg_config --bindir)" python scripts/postgres_smoke.py --suite
 
 `python scripts/benchmark.py` 可复测单个 10000 行 SQLite 快照的 CSV 校验与入库耗时，以及带地区和渠道筛选的数据库聚合耗时。脚本使用临时库，输出数据规模、结果和 预热后 50 次采样的 P50、P95。
 
+PostgreSQL 退款查询的索引对照实验、执行计划、缓冲区访问量与复现步骤见 [SQL_PERFORMANCE.md](SQL_PERFORMANCE.md)。
+
 浏览器验收脚本 `python scripts/browser_smoke.py` 需另装 Playwright 与 Chromium。脚本启动临时服务，验证导入、查询、历史翻页、审计和移动端布局。
 
 `requirements.lock` 记录本次独立虚拟环境全部验收依赖版本，可使用 `pip install -r requirements.lock` 重现。CI 涵盖 SQLite、PostgreSQL、前端语法和容器启动检查。设计与验收范围见 [DESIGN.md](DESIGN.md) 和 [VERIFICATION.md](VERIFICATION.md)。
@@ -83,7 +89,7 @@ PG_BIN="$(pg_config --bindir)" python scripts/postgres_smoke.py --suite
 
 复制 `.env.example` 为 `.env`，填写随机 SETUP_TOKEN，再执行 `docker compose up --build -d`。访问 http://127.0.0.1:18080 。命名卷持久化数据库；`docker compose down -v` 会删除数据。配置只监听回环地址。公网部署需 TLS 反向代理、共享限流、备份与监控；当前实现不是经过生产加固的服务。
 
-首次启动创建 v4 表结构，已有的工作台 v1、v2 或 v3 库会在启动时升级。更新已有部署前先备份并在副本验证。旧库从未保存原始业务订单号，升级会为旧订单生成带标记的内部编号。显式迁移步骤见 [MIGRATION.md](MIGRATION.md)。通过 `DATABASE_URL` 可指定 PostgreSQL 数据库，连接协议为 `postgresql+psycopg://`。
+首次启动创建 v5 表结构，已有的工作台 v1 至 v4 库会在启动时升级。更新已有部署前先备份并在副本验证。旧库从未保存原始业务订单号，升级会为旧订单生成带标记的内部编号。显式迁移步骤见 [MIGRATION.md](MIGRATION.md)。通过 `DATABASE_URL` 可指定 PostgreSQL 数据库，连接协议为 `postgresql+psycopg://`。
 
 ## 接口与维护
 

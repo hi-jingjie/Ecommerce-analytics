@@ -11,6 +11,7 @@ project = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(project))
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--suite', action='store_true', help='also run pytest with PostgreSQL cases enabled')
+parser.add_argument('--benchmark', action='store_true', help='measure the refund aggregate in a separate test database')
 args = parser.parse_args()
 bin_path = Path(os.environ['PG_BIN'])
 with tempfile.TemporaryDirectory(prefix='analytics-pg-') as folder:
@@ -42,6 +43,9 @@ with tempfile.TemporaryDirectory(prefix='analytics-pg-') as folder:
         asyncio.run(check())
         main.engine.dispose()
         print('PASS PostgreSQL: schema, setup, login, demo, user creation, preview, aggregate, history')
+        if args.benchmark:
+            from pg_refund_benchmark import run
+            run(os.environ['DATABASE_URL'])
         if args.suite:
             subprocess.run(
                 [sys.executable, '-m', 'pytest', '-q'],

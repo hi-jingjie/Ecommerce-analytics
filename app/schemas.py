@@ -1,7 +1,7 @@
 from datetime import date
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class Credentials(BaseModel):
@@ -35,3 +35,14 @@ class ImportCSV(BaseModel):
 
 class ChannelBill(BaseModel):
     csv_text: str = Field(min_length=1, max_length=2_000_000)
+
+    start_date: date | None = None
+    end_date: date | None = None
+
+    @model_validator(mode='after')
+    def validate_period(self):
+        if (self.start_date is None) != (self.end_date is None):
+            raise ValueError('账期需要同时填写开始和结束日期')
+        if self.start_date is not None and self.start_date > self.end_date:
+            raise ValueError('账期开始日期不能晚于结束日期')
+        return self

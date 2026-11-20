@@ -56,10 +56,17 @@ class SchemaVersion(Base):
     version: Mapped[int] = mapped_column(Integer)
 
 
+# This covering index was measured against PostgreSQL refund aggregates.
+refund_scope_index = Index('ix_orders_source_region_status_id', 'source_id', 'region', 'status', 'id').ddl_if(
+    dialect='postgresql'
+)
+
+
 class Order(Base):
     __tablename__ = 'orders'
     __table_args__ = (
         UniqueConstraint('source_id', 'order_id', name='uq_orders_source_order'),
+        refund_scope_index,
         CheckConstraint('length(trim(order_id)) > 0 AND length(order_id) <= 128', name='ck_orders_order_id'),
         CheckConstraint('amount_cents BETWEEN 0 AND 99999999999999', name='ck_orders_amount'),
         CheckConstraint('refund_cents BETWEEN 0 AND amount_cents', name='ck_orders_refund'),
@@ -147,7 +154,12 @@ class AuditEvent(Base):
 
 class Reconciliation(Base):
     __tablename__ = 'refund_reconciliations'
-    __table_args__ = (UniqueConstraint('source_id', 'bill_digest', name='uq_source_channel_bill'),)
+    __table_args__ = (
+        UniqueConstraint('source_id', 'bill_digest', name='uq_source_channel_bill'),
+        Index('ix_reconciliation_source_created_id', 'source_id', 'created_at', 'id'),
+    )
+    start_date: Mapped[date | None] = mapped_column(Date)
+    end_date: Mapped[date | None] = mapped_column(Date)
     id: Mapped[int] = mapped_column(primary_key=True)
     source_id: Mapped[int] = mapped_column(ForeignKey('sources.id'))
     bill_digest: Mapped[str] = mapped_column(String(64))

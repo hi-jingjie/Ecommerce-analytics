@@ -4,7 +4,7 @@ from threading import Barrier
 
 from fastapi import HTTPException
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, inspect, select
 
 from app import main
 
@@ -90,3 +90,68 @@ def test_upgrade_from_v3(isolated_engine, context):
     main.init_db()
     assert main.get_reconciliation(report['id'], admin) == report
     assert report['system_total'] == '50.00'
+
+
+def test_report_history_keyset(context):
+    sid, admin = context
+    first = run(sid, admin, [])
+    second = run(sid, admin, ROWS)
+    other = main.import_csv(main.ImportCSV(name='separate', csv_text=(EXAMPLES/'orders.csv').read_text()), admin)
+    run(other['id'], admin, [])
+    page = main.reconciliation_history(sid, admin, limit=1)
+    assert [r['id'] for r in page['items']] == [second['id']]
+    assert 'items' not in page['items'][0]
+    run(sid, admin, [ROWS[0]])
+    older = main.reconciliation_history(sid, admin, limit=1, before_id=page['next_cursor'])
+    assert [r['id'] for r in older['items']] == [first['id']]
+    assert older['next_cursor'] is None
+    with pytest.raises(HTTPException) as err:
+        main.reconciliation_history(sid, {**admin, 'admin': False})
+    assert err.value.status_code == 403
+
+
+def test_period_boundaries_and_bill_identity(context):
+    sid, admin = context
+    bill = HEADER + 'demo-001,R-02,19.99'
+    def submit(start, end, text=bill):
+        data = main.ChannelBill(csv_text=text, start_date=start, end_date=end)
+        return main.reconcile_refunds(sid, data, admin)
+    full = run(sid, admin, ['demo-001,R-02,19.99'])
+    feb = submit('2026-02-01', '2026-02-01')
+    assert feb['id'] != full['id']
+    assert feb['system_total'] == '39.99' and feb['matched'] == 1
+    assert [i['order_id'] for i in feb['items']] == ['demo-002']
+    assert submit('2026-01-31', '2026-01-31', HEADER)['system_total'] == '10.01'
+    assert submit('2026-02-02', '2026-02-03', HEADER)['system_total'] == '0.00'
+    dated = 'order_id,refund_id,refund,refund_day\ndemo-001,R-02,19.99,2026-02-01'
+    assert submit('2026-02-01', '2026-02-01', dated)['id'] == feb['id']
+    assert submit('2026-02-01', '2026-02-02')['id'] != feb['id']
+    with pytest.raises(HTTPException) as err:
+        submit('2026-01-01', '2026-01-31', dated)
+    assert err.value.status_code == 422
+    with pytest.raises(ValueError):
+        main.ChannelBill(csv_text=bill, start_date='2026-01-01')
+    with pytest.raises(ValueError):
+        main.ChannelBill(csv_text=bill, start_date='2026-02-01', end_date='2026-01-31')
+    assert main.get_reconciliation(feb['id'], admin) == feb
+    listed = main.reconciliation_history(sid, admin)['items']
+    assert {i['id']: i['start_date'] for i in listed}[feb['id']].isoformat() == '2026-02-01'
+
+
+def test_v4_reports_keep_contents_and_identity(isolated_engine, context):
+    sid, admin = context
+    old = run(sid, admin, ROWS)
+    with isolated_engine.begin() as conn:
+        if isolated_engine.dialect.name == 'postgresql':
+            conn.exec_driver_sql('DROP INDEX ix_orders_source_region_status_id')
+        conn.exec_driver_sql('DROP INDEX ix_reconciliation_source_created_id')
+        conn.exec_driver_sql('ALTER TABLE refund_reconciliations DROP COLUMN start_date')
+        conn.exec_driver_sql('ALTER TABLE refund_reconciliations DROP COLUMN end_date')
+        conn.exec_driver_sql('UPDATE schema_version SET version=4')
+    main.init_db()
+    main.init_db()
+    indexes = {i['name'] for i in inspect(isolated_engine).get_indexes('orders')}
+    assert ('ix_orders_source_region_status_id' in indexes) == (isolated_engine.dialect.name == 'postgresql')
+    assert run(sid, admin, reversed(ROWS)) == old
+    page = main.reconciliation_history(sid, admin)
+    assert page['items'][0]['start_date'] is None and page['items'][0]['end_date'] is None
