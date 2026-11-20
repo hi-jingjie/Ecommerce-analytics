@@ -17,11 +17,11 @@ from sqlalchemy import create_engine, delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 
-from . import audit
+from . import audit, reconciliation
 from .metrics import aggregate
-from .models import AuditEvent, Base, Bootstrap, Grant, History, Order, Preview, Source, Token, User
+from .models import AuditEvent, Base, Bootstrap, Grant, History, Order, Preview, Reconciliation, Source, Token, User
 from .orders import parse_orders
-from .schemas import Access, Credentials, ImportCSV, NewUser, Query
+from .schemas import Access, ChannelBill, Credentials, ImportCSV, NewUser, Query
 
 
 DATABASE_URL = os.environ.get('DATABASE_URL', 'sqlite:///./analytics-v1.db')
@@ -284,6 +284,30 @@ def import_csv(data: ImportCSV, user=Depends(require_user)):
             db.rollback()
             raise HTTPException(409, '数据源名称已存在')
         return {'id': source.id, 'rows': len(rows)}
+
+@app.post('/api/sources/{source_id}/reconciliations')
+def reconcile_refunds(source_id: int, data: ChannelBill, user=Depends(require_user)):
+    admin_only(user)
+    audit.add_context(source_id=source_id)
+    channel = reconciliation.parse_bill(data.csv_text)
+    with SessionLocal.begin() as db:
+        if db.get(Source, source_id) is None:
+            raise HTTPException(404, '数据源不存在')
+        record, reused = reconciliation.save(db, source_id, user['id'], channel)
+        audit.success(db, 'refund.reconcile', user['id'], source_id=source_id,
+                      reconciliation_id=record.id, reused=reused)
+        return reconciliation.present(record)
+
+
+@app.get('/api/reconciliations/{report_id}')
+def get_reconciliation(report_id: int, user=Depends(require_user)):
+    admin_only(user)
+    with SessionLocal() as db:
+        record = db.get(Reconciliation, report_id)
+        if record is None:
+            raise HTTPException(404, '对账报告不存在')
+        return reconciliation.present(record)
+
 
 @app.post('/api/previews')
 def preview(data: Query, user=Depends(require_user)):

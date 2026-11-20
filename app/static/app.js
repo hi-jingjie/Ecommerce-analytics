@@ -44,7 +44,7 @@ const actions = {
   'user.create': '创建用户', 'user.access': '更新访问权限',
   'source.import': '导入数据源', 'source.demo': '创建演示数据',
   'query.preview': '生成查询预览', 'query.execute': '执行预览',
-  'system.setup': '初始化管理员',
+  'system.setup': '初始化管理员', 'refund.reconcile': '退款对账',
 };
 const refreshAudit = tablePage('/audit', 'audit', 'audit-more', row => {
   const d = row.details;
@@ -58,12 +58,12 @@ const refreshAudit = tablePage('/audit', 'audit', 'audit-more', row => {
   return [new Date(row.created_at).toLocaleString(), row.actor_id,
           actions[row.action] || row.action, row.status_code, detail || '—'];
 });
-async function refreshSources(){const data=await api('/sources');$('source').replaceChildren();for(const s of data){const option=document.createElement('option');option.value=s.id;option.textContent=s.name;$('source').append(option);}$('source-list').textContent=data.map(s=>`${s.id}: ${s.name}`).join('\n');clearPreview();}
+async function refreshSources(){const data=await api('/sources');$('source').replaceChildren();for(const s of data){const option=document.createElement('option');option.value=s.id;option.textContent=s.name;$('source').append(option);}$('bill-source').replaceChildren(...Array.from($('source').options, option=>option.cloneNode(true)));clearBill();$('source-list').textContent=data.map(s=>`${s.id}: ${s.name}`).join('\n');clearPreview();}
 async function refreshUsers(){const data=await api('/users');$('users').replaceChildren();for(const u of data){const item=document.createElement('div');const title=document.createElement('p');title.textContent=`${u.username} · ${u.admin?'管理员':'普通用户'} · ${u.active?'启用':'禁用'}`;item.append(title);if(!u.admin){const form=document.createElement('form');const region=document.createElement('input');region.placeholder='地区，空为全部';region.value=u.region||'';const sources=document.createElement('input');sources.placeholder='数据源编号';sources.value=u.source_ids.join(',');const active=document.createElement('input');active.type='checkbox';active.checked=u.active;active.title='账号启用';const button=document.createElement('button');button.textContent='更新权限';form.append(region,sources,active,button);form.addEventListener('submit',async e=>{e.preventDefault();try{await api(`/users/${u.id}/access`,{region:region.value||null,source_ids:parseIds(sources.value),active:active.checked},'PUT');await refreshUsers();$('notice').textContent='权限已更新';}catch(err){$('notice').textContent=err.message;}});item.append(form);}$('users').append(item);}}
 function parseIds(value){if(!value.trim())return [];const ids=value.split(',').map(Number);if(ids.some(n=>!Number.isInteger(n)||n<1))throw new Error('数据源编号必须为正整数');return ids;}
 bind('login','submit',async e=>{const data=await api('/login',formData(e.target));token=data.access_token;const me=await api('/me');$('auth').hidden=true;$('workspace').hidden=false;$('logout').hidden=false;$('admin').hidden=!me.admin;e.target.reset();await refreshSources();await refreshHistory();if(me.admin)await Promise.all([refreshUsers(),refreshAudit()]);});
 bind('setup','submit',async e=>{const data=formData(e.target);const response=await fetch('/api/setup',{method:'POST',headers:{'Content-Type':'application/json','X-Setup-Token':data.setup_token},body:JSON.stringify({username:data.username,password:data.password})});const result=await response.json();if(!response.ok)throw new Error(typeof result.detail==='string'?result.detail:'初始化输入无效');$('notice').textContent='初始化完成，请登录';e.target.reset();});
-bind('logout','click',async()=>{await api('/logout',{});token='';clearPreview();for(const id of ['history','audit','users','result','source-list','source','plan'])$(id).replaceChildren();for(const id of ['history-more','audit-more'])$(id).hidden=true;$('workspace').hidden=true;$('auth').hidden=false;$('logout').hidden=true;});
+bind('logout','click',async()=>{await api('/logout',{});token='';clearPreview();clearBill();$('reconcile').reset();for(const id of ['history','audit','users','result','source-list','source','plan'])$(id).replaceChildren();for(const id of ['history-more','audit-more'])$(id).hidden=true;$('workspace').hidden=true;$('auth').hidden=false;$('logout').hidden=true;});
 bind('query','submit',async e=>{clearPreview();const data=formData(e.target);data.source_id=Number(data.source_id);data.channel=data.channel||null;const p=await api('/previews',data);previewId=p.id;$('plan').textContent=`数据源：${p.source}\n指标：${names[p.query.metric]}\n日期：${p.query.start_date} 至 ${p.query.end_date}（含首尾日）\n统计依据：${p.date_basis}\n地区：${p.region||'全部授权地区'}\n渠道：${p.query.channel||'全部'}\n预览有效期：5 分钟`;$('preview').hidden=false;$('result').textContent='';});
 $('query').addEventListener('input',clearPreview);
 bind('execute','click',async()=>{if(!previewId)return;const id=previewId;clearPreview();const r=await api(`/previews/${id}/execute`,{});$('result').textContent=`${names[r.metric]}：${r.value}（${r.count} 条记录）`;await refreshHistory();});
@@ -84,3 +84,42 @@ bind('import','submit', async e => {
   await refreshSources();
 });
 bind('user','submit',async e=>{const d=formData(e.target);await api('/users',{username:d.username,password:d.password,region:d.region||null,source_ids:parseIds(d.sources)});e.target.reset();await refreshUsers();});
+
+let billRevision = 0, billItems = [], shown = 0;
+const billStatuses = {amount_mismatch:'金额不符', system_only:'仅系统', channel_only:'仅渠道', review:'待核对'};
+function clearBill() {
+  billRevision++;
+  billItems = [];
+  shown = 0;
+  $('bill-result').hidden = true;
+  $('bill-rows').replaceChildren();
+  $('bill-summary').textContent = '';
+}
+function showBillRows() {
+  for (const item of billItems.slice(shown, shown + 50)) {
+    const row = $('bill-rows').insertRow();
+    for (const value of [billStatuses[item.status], item.order_id, item.refund_id,
+                         item.system_amount, item.channel_amount, item.difference]) {
+      row.insertCell().textContent = value ?? '—';
+    }
+    shown++;
+  }
+  $('bill-more').hidden = shown >= billItems.length;
+}
+$('reconcile').addEventListener('change', clearBill);
+bind('bill-more','click', showBillRows);
+bind('reconcile','submit', async e => {
+  clearBill();
+  const revision = billRevision;
+  const file = e.target.elements.bill.files[0];
+  if (file.size > 2000000) throw new Error('渠道账单最多 2 MB');
+  const source = $('bill-source').value;
+  const report = await api('/sources/' + source + '/reconciliations', {csv_text: await file.text()});
+  if (revision !== billRevision) return;
+  billItems = report.items;
+  $('bill-summary').textContent = '报告 #' + report.id + ' · 系统 ' + report.system_total +
+    ' 元 · 渠道 ' + report.channel_total + ' 元 · 差额 ' + report.difference + ' 元 · 已匹配 ' +
+    report.matched + ' 笔 · 差异及待核对 ' + report.items.length + ' 条';
+  showBillRows();
+  $('bill-result').hidden = false;
+});

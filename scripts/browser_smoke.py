@@ -65,6 +65,12 @@ with tempfile.TemporaryDirectory(prefix='analytics-browser-') as folder:
                 expect(page.locator('#plan')).to_contain_text('退款发生日')
                 page.locator('#execute').click()
                 expect(page.locator('#result')).to_contain_text('39.99')
+                page.locator('#bill-source').select_option(label='CSV 导入')
+                page.locator('#reconcile [name=bill]').set_input_files(root/'examples/channel-bill.csv')
+                page.locator('#reconcile button').click()
+                expect(page.locator('#bill-summary')).to_contain_text('差额 2.00 元')
+                expect(page.locator('#bill-rows')).to_contain_text('待核对')
+                expect(page.locator('#bill-rows')).to_contain_text('金额不符')
                 page.locator('#audit-refresh').click()
                 expect(page.locator('#audit tr').first).to_be_visible()
 
@@ -98,7 +104,7 @@ with tempfile.TemporaryDirectory(prefix='analytics-browser-') as folder:
                 expect(page.locator('#auth')).to_be_visible()
                 assert not errors, errors
                 browser.close()
-                print('PASS browser: setup, login, demo, preview, execute, history pagination, audit, multi-day refund CSV import, mobile layout, logout')
+                print('PASS browser: setup, login, demo, preview, execute, history pagination, audit, multi-day refund CSV import, channel reconciliation report, mobile layout, logout')
         finally:
             process.terminate()
             process.wait(timeout=10)

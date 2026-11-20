@@ -18,6 +18,7 @@ ROUTE_ACTIONS = {
     'setup': 'system.setup',
     'demo': 'source.demo',
     'import_csv': 'source.import',
+    'reconcile_refunds': 'refund.reconcile',
     'create_user': 'user.create',
     'update_access': 'user.access',
     'preview': 'query.preview',

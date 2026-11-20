@@ -143,3 +143,14 @@ class AuditEvent(Base):
     details: Mapped[str] = mapped_column(Text)
     duration_ms: Mapped[int] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class Reconciliation(Base):
+    __tablename__ = 'refund_reconciliations'
+    __table_args__ = (UniqueConstraint('source_id', 'bill_digest', name='uq_source_channel_bill'),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    source_id: Mapped[int] = mapped_column(ForeignKey('sources.id'))
+    bill_digest: Mapped[str] = mapped_column(String(64))
+    created_by: Mapped[int] = mapped_column(ForeignKey('users.id'))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    report: Mapped[str] = mapped_column(Text)

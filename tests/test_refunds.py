@@ -63,14 +63,15 @@ def test_invalid_refund_file_rolls_back(admin):
 
 def test_v2_refund_backfill_is_idempotent(isolated_engine, admin):
     sid = main.import_csv(main.ImportCSV(name='legacy', csv_text=ORDERS), admin)['id']
-    # The v2 schema is identical except for the event table and version marker.
+    # The v2 schema is identical except for the event and reconciliation tables and version marker.
     with isolated_engine.begin() as conn:
+        conn.exec_driver_sql('DROP TABLE refund_reconciliations')
         conn.exec_driver_sql('DROP TABLE refund_events')
         conn.exec_driver_sql('UPDATE schema_version SET version=2')
     main.init_db()
     main.init_db()
     with isolated_engine.connect() as conn:
-        assert conn.exec_driver_sql('SELECT version FROM schema_version').scalar_one() == 3
+        assert conn.exec_driver_sql('SELECT version FROM schema_version').scalar_one() == 4
         assert conn.exec_driver_sql('SELECT refund_id, amount_cents FROM refund_events').all() == [(None, 500)]
     q = main.Query(metric='refund_amount', source_id=sid, start_date='2026-02-01', end_date='2026-02-01')
     result = main.execute_preview(main.preview(q, admin)['id'], admin)

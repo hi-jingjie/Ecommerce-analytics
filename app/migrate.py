@@ -1,14 +1,14 @@
-"""Transactional database initialization and upgrade for the supported v1 and v2 schemas."""
+"""Transactional database initialization and upgrade for the supported earlier schemas."""
 import re
 from decimal import Decimal
 
 from sqlalchemy import CheckConstraint, UniqueConstraint, inspect, select, text
 from sqlalchemy.schema import AddConstraint, CreateColumn
 
-from app.models import Base, History, Order, RefundEvent, SchemaVersion, Source
+from app.models import Base, History, Order, Reconciliation, RefundEvent, SchemaVersion, Source
 
 
-VERSION = 3
+VERSION = 4
 # Frozen v1 contract. Verify before rebuilding tables so unknown columns are never lost.
 V1_COLUMNS = {
     'bootstrap': 'id',
@@ -189,19 +189,22 @@ def upgrade(engine):
         tables = set(inspector.get_table_names())
         if 'schema_version' in tables:
             versions = conn.execute(select(SchemaVersion.id, SchemaVersion.version)).all()
-            if versions not in ([(1, 2)], [(1, VERSION)]):
+            if versions not in ([(1, 2)], [(1, 3)], [(1, VERSION)]):
                 raise RuntimeError(f'不支持的数据库版本 {versions!r}')
-            upgrading = versions == [(1, 2)]
+            version = versions[0][1]
+            added_in = {RefundEvent.__table__: 3, Reconciliation.__table__: 4}
             for table in Base.metadata.tables.values():
-                if upgrading and table is RefundEvent.__table__:
+                if version < added_in.get(table, 1):
                     if table.name in tables:
-                        raise RuntimeError('v2 库已有 refund_events 表，请核查结构')
+                        raise RuntimeError(f'旧库已有 {table.name} 表，请核查结构')
                     continue
                 if table.name not in tables or not set(table.c.keys()) <= {c['name'] for c in inspector.get_columns(table.name)}:
                     raise RuntimeError(f'数据库版本标记与数据表 {table.name} 不一致')
-            if upgrading:
+            if version < 3:
                 RefundEvent.__table__.create(conn)
                 _copy_legacy_refunds(conn)
+            if version < 4:
+                Reconciliation.__table__.create(conn)
                 conn.execute(SchemaVersion.__table__.update().where(SchemaVersion.id == 1).values(version=VERSION))
             return VERSION
 

@@ -41,6 +41,14 @@ uvicorn app.main:app --host 127.0.0.1 --port 18080 --no-proxy-headers
 
 退款明细包含 `order_id,refund_id,refund_day,refund` 四列。每笔退款金额为正，退款编号在同一订单内唯一，日期不能早于支付日，累计不能超过支付金额。采用明细的订单在订单 CSV 中填 `refund=0` 并留空 `refund_day`。两份文件每份最多 10000 行，任一明细校验失败会拒绝整次导入。API 调用方在 `POST /api/sources/import` 的请求体中可选传入 `refunds_csv_text`。
 
+### 退款对账
+
+管理员在“退款对账”选择刚导入的快照，上传 [渠道账单样例](examples/channel-bill.csv)。账单覆盖快照中的全部退款，表头为 `order_id,refund_id,refund`，每个订单内退款编号唯一。订单号和退款编号按原文匹配，保留前导零。支持只含表头的零流水账单。
+
+样例的系统退款共 50.00 元，渠道共 48.00 元。报告中 `demo-001 / R-02` 显示系统 19.99 元、渠道 17.99 元，差额 +2.00 元。旧退款缺少编号时，系统流水和同订单未匹配的渠道流水分行列为“待核对”，行差额留空。总差额仍包含全部流水；净差额为零时也要查看逐笔差异。
+
+同一快照重复上传相同内容会返回已保存的报告编号。调整行序或把 10.0 改写为 10.00 都会复用报告。变更金额、订单号或退款编号会生成新报告。文件上限为 2 MB、20000 条。管理员 API 支持 `POST /api/sources/{source_id}/reconciliations`（JSON 字段 `csv_text`）和 `GET /api/reconciliations/{report_id}`。
+
 ## 指标口径 v1
 
 | 指标 | 日期依据 | 计算 |
@@ -75,7 +83,7 @@ PG_BIN="$(pg_config --bindir)" python scripts/postgres_smoke.py --suite
 
 复制 `.env.example` 为 `.env`，填写随机 SETUP_TOKEN，再执行 `docker compose up --build -d`。访问 http://127.0.0.1:18080 。命名卷持久化数据库；`docker compose down -v` 会删除数据。配置只监听回环地址。公网部署需 TLS 反向代理、共享限流、备份与监控；当前实现不是经过生产加固的服务。
 
-首次启动创建 v3 表结构，已有的工作台 v1 或 v2 库会在启动时升级。更新已有部署前先备份并在副本验证。旧库从未保存原始业务订单号，升级会为旧订单生成带标记的内部编号。显式迁移步骤见 [MIGRATION.md](MIGRATION.md)。通过 `DATABASE_URL` 可指定 PostgreSQL 数据库，连接协议为 `postgresql+psycopg://`。
+首次启动创建 v4 表结构，已有的工作台 v1、v2 或 v3 库会在启动时升级。更新已有部署前先备份并在副本验证。旧库从未保存原始业务订单号，升级会为旧订单生成带标记的内部编号。显式迁移步骤见 [MIGRATION.md](MIGRATION.md)。通过 `DATABASE_URL` 可指定 PostgreSQL 数据库，连接协议为 `postgresql+psycopg://`。
 
 ## 接口与维护
 

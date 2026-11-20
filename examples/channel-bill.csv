@@ -1,0 +1,4 @@
+order_id,refund_id,refund
+demo-001,R-01,10.01
+demo-001,R-02,17.99
+demo-002,CHANNEL-03,20.00
