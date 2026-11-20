@@ -72,5 +72,15 @@ bind('history-more','click',()=>refreshHistory(true));
 bind('audit-refresh','click',()=>refreshAudit());
 bind('audit-more','click',()=>refreshAudit(true));
 bind('demo','click',async()=>{await api('/demo',{});await refreshSources();});
-bind('import','submit',async e=>{const file=e.target.elements.file.files[0];if(file.size>2000000)throw new Error('CSV 文件最多 2 MB');await api('/sources/import',{name:e.target.elements.name.value,csv_text:await file.text()});e.target.reset();await refreshSources();});
+bind('import','submit', async e => {
+  const fields = e.target.elements;
+  const orders = fields.file.files[0], refunds = fields.refund_file.files[0];
+  if (orders.size > 2000000 || (refunds && refunds.size > 2000000))
+    throw new Error('每个 CSV 文件最多 2 MB');
+  const data = {name: fields.name.value, csv_text: await orders.text()};
+  if (refunds) data.refunds_csv_text = await refunds.text();
+  await api('/sources/import', data);
+  e.target.reset();
+  await refreshSources();
+});
 bind('user','submit',async e=>{const d=formData(e.target);await api('/users',{username:d.username,password:d.password,region:d.region||null,source_ids:parseIds(d.sources)});e.target.reset();await refreshUsers();});

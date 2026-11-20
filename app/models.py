@@ -3,7 +3,7 @@ from decimal import Decimal
 
 from sqlalchemy import (BigInteger, Boolean, CheckConstraint, Date, DateTime, ForeignKey,
                         Index, Integer, String, Text, UniqueConstraint)
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
 class Base(DeclarativeBase):
@@ -77,6 +77,23 @@ class Order(Base):
     amount_cents: Mapped[int] = mapped_column(BigInteger)
     refund_cents: Mapped[int] = mapped_column(BigInteger, default=0)
     refund_day: Mapped[date | None] = mapped_column(Date, nullable=True)
+
+    refund_events: Mapped[list['RefundEvent']] = relationship()
+
+
+class RefundEvent(Base):
+    __tablename__ = 'refund_events'
+    __table_args__ = (
+        UniqueConstraint('order_pk', 'refund_id', name='uq_order_refund_id'),
+        Index('ix_refund_events_day_order', 'day', 'order_pk'),
+        CheckConstraint('amount_cents BETWEEN 0 AND 99999999999999', name='ck_refund_event_amount'),
+        CheckConstraint("typeof(amount_cents) = 'integer'", name='ck_refund_event_integer').ddl_if(dialect='sqlite'),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    order_pk: Mapped[int] = mapped_column(ForeignKey('orders.id'))
+    refund_id: Mapped[str | None] = mapped_column(String(128))
+    day: Mapped[date] = mapped_column(Date)
+    amount_cents: Mapped[int] = mapped_column(BigInteger)
 
 
 class History(Base):

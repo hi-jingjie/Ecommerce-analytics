@@ -1,5 +1,11 @@
 # 验收记录
 
+## 2026-11-20 跨日退款
+
+SQLite 和 PostgreSQL 17 完整套件共 42 项通过。新增用例验证同单多笔退款、按天和跨月汇总、地区与渠道筛选、累计超额回滚，以及 v2 升级后重复运行只回填一次。Chromium 通过工作台同时上传两份样例 CSV，查询到 2026-02-01 全部地区退款 39.99 元。
+
+## 2026-11-19 金额与权限
+
 2026-11-19 在 Python 3.11、SQLite 和 PostgreSQL 17 下验证了数据库结构 v2。执行 `PG_BIN="$(pg_config --bindir)" python scripts/postgres_smoke.py --suite`，临时 PostgreSQL 实例的 HTTP 冒烟通过，完整套件 36 项通过。
 
 | 范围 | 检查结果 |

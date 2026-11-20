@@ -1,6 +1,6 @@
-# 数据库结构升级到 v2
+# 数据库结构升级到 v3
 
-从项目根目录运行。应用启动和 `python -m app.migrate` 使用同一个迁移入口，目标库由 `DATABASE_URL` 决定。空库直接建 v2，完整的无版本标记 v1 库升级到 v2，重复执行会校验 v2 结构。默认文件名仍为 `analytics-v1.db`。指标口径版本仍为 1。
+从项目根目录运行。应用启动和 `python -m app.migrate` 使用同一个迁移入口，目标库由 `DATABASE_URL` 决定。空库直接创建 v3。已有 v1 和 v2 库在事务内升级到 v3，重复执行只校验现有结构。默认文件名仍为 `analytics-v1.db`。指标口径版本仍为 1。
 
 ## 在副本上演练
 
@@ -17,7 +17,7 @@ sqlite3 -readonly analytics-rehearsal.db 'PRAGMA integrity_check'
 sqlite3 -readonly analytics-rehearsal.db 'PRAGMA foreign_key_check'
 ```
 
-预期版本为 2，完整性检查返回 `ok`，外键检查返回零行。正式升级时，在同一目录使用实际文件地址运行 `DATABASE_URL=sqlite:///./analytics-v1.db python -m app.migrate`。Compose 部署的数据文件在卷内的 `/data/analytics-v1.db`，应先停止服务并备份实际卷内数据库，再用新版镜像执行 `docker compose run --rm --no-deps analytics python -m app.migrate`。
+预期版本为 3，完整性检查返回 `ok`，外键检查返回零行。正式升级时，在同一目录使用实际文件地址运行 `DATABASE_URL=sqlite:///./analytics-v1.db python -m app.migrate`。Compose 部署的数据文件在卷内的 `/data/analytics-v1.db`，应先停止服务并备份实际卷内数据库，再用新版镜像执行 `docker compose run --rm --no-deps analytics python -m app.migrate`。
 
 **PostgreSQL**。以下命令使用本机连接参数和数据库名 `analytics`，也可通过标准 libpq 环境变量指定主机、端口和用户。迁移账号需要对应用表和序列执行 DDL 的权限。应用连接地址使用 SQLAlchemy 的 `postgresql+psycopg` 协议。
 
@@ -30,6 +30,10 @@ psql -d analytics_rehearsal -c 'SELECT version FROM schema_version WHERE id=1'
 ```
 
 演练通过后，使用实际连接地址执行 `DATABASE_URL=postgresql+psycopg:///analytics python -m app.migrate`。升级持有事务级建议锁，并对被修改表加锁。SQLite 使用 `BEGIN IMMEDIATE` 在检查和重建前取得写锁。版本记录和数据转换在同一事务中提交。
+
+## 退款事件回填
+
+v2 升级会创建 `refund_events`，每条已有退款日期的订单生成一条事件，保留原金额、日期和订单主键，业务退款编号留空。v1 先转换金额再执行同样的回填。版本标记与回填一起提交。首次升级完成后，在导入新数据前，可对比 `SELECT count(*), sum(refund_cents) FROM orders WHERE refund_day IS NOT NULL` 与 `SELECT count(*), sum(amount_cents) FROM refund_events`。历史查询保留原结果。
 
 ## 对账与历史语义
 

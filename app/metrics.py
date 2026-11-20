@@ -3,16 +3,19 @@ from decimal import Decimal
 
 from sqlalchemy import func, select
 
-from .models import Order
+from .models import Order, RefundEvent
 
 
 def aggregate(db, data, user):
-    day = Order.refund_day if data.metric == 'refund_amount' else Order.day
-    cents = Order.refund_cents if data.metric == 'refund_amount' else Order.amount_cents
-    stmt = select(func.count(Order.id), func.coalesce(func.sum(cents), 0)).where(
-        day >= data.start_date, day <= data.end_date, Order.status == 'paid',
-        Order.source_id == data.source_id,
-    )
+    if data.metric == 'refund_amount':
+        stmt = select(func.count(Order.id.distinct()), func.coalesce(func.sum(RefundEvent.amount_cents), 0))
+        stmt = stmt.select_from(Order).join(RefundEvent, RefundEvent.order_pk == Order.id)
+        day = RefundEvent.day
+    else:
+        stmt = select(func.count(Order.id), func.coalesce(func.sum(Order.amount_cents), 0))
+        day = Order.day
+    stmt = stmt.where(day.between(data.start_date, data.end_date), Order.status == 'paid',
+                      Order.source_id == data.source_id)
     if user['region'] is not None:
         stmt = stmt.where(Order.region == user['region'])
     if data.channel:

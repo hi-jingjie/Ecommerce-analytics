@@ -6,7 +6,7 @@ import threading
 import time
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Annotated
 
@@ -137,7 +137,14 @@ def demo(user=Depends(require_user)):
         source = Source(name='演示订单')
         db.add(source)
         db.flush()
-        db.add_all([Order(source_id=source.id, order_id='demo-1', day=date(2026, 1, 10), region='华东', channel='网页', status='paid', amount_cents=10000, refund_cents=0), Order(source_id=source.id, order_id='demo-2', day=date(2026, 1, 11), region='华北', channel='移动端', status='paid', amount_cents=20000, refund_cents=2000, refund_day=date(2026, 2, 1))])
+        rows = parse_orders(
+            'order_id,day,region,channel,amount,status,refund,refund_day\n'
+            'demo-1,2026-01-10,华东,网页,100.00,paid,0,\n'
+            'demo-2,2026-01-11,华北,移动端,200.00,paid,20.00,2026-02-01\n'
+        )
+        for row in rows:
+            row.source_id = source.id
+        db.add_all(rows)
         audit.success(db, 'source.demo', user['id'], source_id=source.id, rows=2)
         db.commit()
     return {'message': '示例数据已创建'}
@@ -261,7 +268,7 @@ def sources(user=Depends(require_user)):
 @app.post('/api/sources/import', status_code=201)
 def import_csv(data: ImportCSV, user=Depends(require_user)):
     admin_only(user)
-    rows = parse_orders(data.csv_text)
+    rows = parse_orders(data.csv_text, data.refunds_csv_text)
     with SessionLocal() as db:
         source = Source(name=data.name)
         db.add(source)

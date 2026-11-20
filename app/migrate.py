@@ -1,14 +1,14 @@
-"""Transactional database initialization and upgrade for the supported v1 schema."""
+"""Transactional database initialization and upgrade for the supported v1 and v2 schemas."""
 import re
 from decimal import Decimal
 
 from sqlalchemy import CheckConstraint, UniqueConstraint, inspect, select, text
 from sqlalchemy.schema import AddConstraint, CreateColumn
 
-from app.models import Base, History, Order, SchemaVersion, Source
+from app.models import Base, History, Order, RefundEvent, SchemaVersion, Source
 
 
-VERSION = 2
+VERSION = 3
 # Frozen v1 contract. Verify before rebuilding tables so unknown columns are never lost.
 V1_COLUMNS = {
     'bootstrap': 'id',
@@ -167,8 +167,15 @@ def _upgrade_v1(conn):
         _postgres_upgrade(conn)
 
 
+def _copy_legacy_refunds(conn):
+    conn.exec_driver_sql("""
+        INSERT INTO refund_events (order_pk, day, amount_cents)
+        SELECT id, refund_day, refund_cents FROM orders WHERE refund_day IS NOT NULL
+    """)
+
+
 def upgrade(engine):
-    """Upgrade a fresh or recognized v1 database in one locked transaction."""
+    """Upgrade a fresh or recognized application database in one locked transaction."""
     with engine.begin() as conn:
         if conn.dialect.name == 'sqlite':
             # sqlite3 legacy transaction control otherwise auto-commits early DDL.
@@ -182,18 +189,30 @@ def upgrade(engine):
         tables = set(inspector.get_table_names())
         if 'schema_version' in tables:
             versions = conn.execute(select(SchemaVersion.id, SchemaVersion.version)).all()
-            if versions != [(1, VERSION)]:
+            if versions not in ([(1, 2)], [(1, VERSION)]):
                 raise RuntimeError(f'不支持的数据库版本 {versions!r}')
+            upgrading = versions == [(1, 2)]
             for table in Base.metadata.tables.values():
+                if upgrading and table is RefundEvent.__table__:
+                    if table.name in tables:
+                        raise RuntimeError('v2 库已有 refund_events 表，请核查结构')
+                    continue
                 if table.name not in tables or not set(table.c.keys()) <= {c['name'] for c in inspector.get_columns(table.name)}:
                     raise RuntimeError(f'数据库版本标记与数据表 {table.name} 不一致')
+            if upgrading:
+                RefundEvent.__table__.create(conn)
+                _copy_legacy_refunds(conn)
+                conn.execute(SchemaVersion.__table__.update().where(SchemaVersion.id == 1).values(version=VERSION))
             return VERSION
 
-        if tables & set(Base.metadata.tables):
+        legacy = bool(tables & set(Base.metadata.tables))
+        if legacy:
             if tables & (set(Base.metadata.tables) - V1_COLUMNS.keys()):
-                raise RuntimeError('v2 数据库缺少 schema_version，请核查备份与数据库结构')
+                raise RuntimeError('数据库缺少 schema_version，请核查备份与数据库结构')
             _upgrade_v1(conn)
         Base.metadata.create_all(conn)
+        if legacy:
+            _copy_legacy_refunds(conn)
         conn.execute(SchemaVersion.__table__.insert().values(id=1, version=VERSION))
         return VERSION
 

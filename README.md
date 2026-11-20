@@ -35,6 +35,12 @@ uvicorn app.main:app --host 127.0.0.1 --port 18080 --no-proxy-headers
 
 可使用 `examples/orders.csv` 导入另一个数据源。每次导入创建不可修改的快照，名称必须唯一，一行一笔订单，业务订单编号在同一快照内唯一，保留前导零。
 
+### 一笔订单跨月退款
+
+在同一次导入中选择 [订单样例](examples/orders.csv) 和 [退款明细样例](examples/refunds.csv)。订单 `demo-001` 于 1 月 31 日退 10.01 元、2 月 1 日退 19.99 元。按“华东”查询这两天，分别得到 10.01 和 19.99 元；查询两天合计 30.00 元，命中 1 笔订单。
+
+退款明细包含 `order_id,refund_id,refund_day,refund` 四列。每笔退款金额为正，退款编号在同一订单内唯一，日期不能早于支付日，累计不能超过支付金额。采用明细的订单在订单 CSV 中填 `refund=0` 并留空 `refund_day`。两份文件每份最多 10000 行，任一明细校验失败会拒绝整次导入。API 调用方在 `POST /api/sources/import` 的请求体中可选传入 `refunds_csv_text`。
+
 ## 指标口径 v1
 
 | 指标 | 日期依据 | 计算 |
@@ -42,9 +48,9 @@ uvicorn app.main:app --host 127.0.0.1 --port 18080 --no-proxy-headers
 | 支付金额 | day（支付日） | paid 订单的 amount 之和 |
 | 支付订单数 | day | paid 订单行数 |
 | 客单价 | day | 支付金额 / 订单数；无订单返回 0 |
-| 退款金额 | refund_day | paid 订单的 refund 之和 |
+| 退款金额 | refund_day | 按发生日期汇总已支付订单的退款明细金额 |
 
-范围含首尾业务日期，金额两位小数。执行结果用十进制字符串返回。v1 每笔订单仅表达一个汇总退款及一个退款日期，不支持跨日多次退款。指标口径为固定 v1，不支持动态指标编辑。
+范围含首尾业务日期，金额两位小数。执行结果用十进制字符串返回。退款命中数按订单去重，支付指标仍按订单统计。指标口径为固定 v1，不支持动态指标编辑。
 
 ## 测试
 
@@ -69,7 +75,7 @@ PG_BIN="$(pg_config --bindir)" python scripts/postgres_smoke.py --suite
 
 复制 `.env.example` 为 `.env`，填写随机 SETUP_TOKEN，再执行 `docker compose up --build -d`。访问 http://127.0.0.1:18080 。命名卷持久化数据库；`docker compose down -v` 会删除数据。配置只监听回环地址。公网部署需 TLS 反向代理、共享限流、备份与监控；当前实现不是经过生产加固的服务。
 
-首次启动创建 v2 表结构，已有的工作台 v1 库会在启动时升级。更新已有部署前先备份并在副本验证。旧库从未保存原始业务订单号，升级会为旧订单生成带标记的内部编号。显式迁移步骤见 [MIGRATION.md](MIGRATION.md)。通过 `DATABASE_URL` 可指定 PostgreSQL 数据库，连接协议为 `postgresql+psycopg://`。
+首次启动创建 v3 表结构，已有的工作台 v1 或 v2 库会在启动时升级。更新已有部署前先备份并在副本验证。旧库从未保存原始业务订单号，升级会为旧订单生成带标记的内部编号。显式迁移步骤见 [MIGRATION.md](MIGRATION.md)。通过 `DATABASE_URL` 可指定 PostgreSQL 数据库，连接协议为 `postgresql+psycopg://`。
 
 ## 接口与维护
 

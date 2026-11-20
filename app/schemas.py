@@ -30,3 +30,4 @@ class NewUser(Credentials, Access):
 class ImportCSV(BaseModel):
     name: str = Field(min_length=1, max_length=80, pattern=r'^[^\x00]+$')
     csv_text: str = Field(min_length=1, max_length=2_000_000)
+    refunds_csv_text: str | None = Field(default=None, min_length=1, max_length=2_000_000)
